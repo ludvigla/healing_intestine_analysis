@@ -1,0 +1,374 @@
+---
+title: "Unrolling"
+author: "Ludvig Larsson"
+date: "5/14/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## unroll Colon
+***
+
+First we nee to load the outlined base of the rolled colon. I have created 5 "base layers" by drawing a trace along the base and each layer corresponds to layers of the roll. We can extract the pixel coordinates of the outlined layers and also the spot coordinates and convert them to the same coordinate system. 
+
+The plot below shows the spots in grey and the colored layers.
+
+```{r, fig.width=7, fig.height=6}
+
+library(magick)
+library(imager)
+library(STutility)
+library(zeallot)
+
+```
+
+```{r load_data}
+se.Colon <- readRDS("../R_objects/se.Colon")
+```
+
+```{r fig.width=6.5, fig.height=6}
+
+#base.layers <- list.files(path = "../data/V19S23-097_A1/spatial/", pattern = "base_layer_", full.names = TRUE)
+#blocking.layers <- "~/Eduardo/data/V19S23-097_A1/spatial/blocking_layer.png"
+base.layers <- c("../data/V19S23-097_A1/spatial/base_layer_alternative.png",
+                 "../data/V19S23-097_A1/spatial/block_layer_alternative.png")
+xy.all <- do.call(rbind, lapply(seq_along(base.layers), function(i) {
+  im <- base.layers[[i]]
+  x <- image_read(im) %>% as.raster() 
+  xy <- as.data.frame(which(x == "#000000ff", arr.ind = T))
+  xy$layer <- i
+  return(xy)
+}))
+
+# Get coordinates
+st.object <- GetStaffli(se.Colon)
+ls <- as.numeric(unlist(strsplit(st.object@dims$`1`$geometry, "x|\\+")))
+w <- ls[1]; h <- ls[2]; offx <- ls[3]; offy <- ls[4]
+spots <- subset(GetStaffli(se.Colon)@meta.data, sample == "1")[, c("pixel_x", "pixel_y")]
+spots$pixel_x <- spots$pixel_x + offx
+spots$pixel_y <- spots$pixel_y + offy
+spots <- spots*(600/9901)
+plot(xy.all[, 2:1], xlim = c(0, 600), ylim = c(541, 0), cex = 0.1, axes = FALSE, col = xy.all$layer)
+points(spots, cex=0.3, pch=19, col = "gray")
+
+```
+
+```{r fig.width=6.5, fig.height=6}
+
+gg <- st.object@meta.data[, c("pixel_x", "pixel_y")]
+p <- ggplot(spots, aes(pixel_x, 2000 - pixel_y)) +
+  geom_point(size = 1, color = "orange") +
+  theme_void()
+p
+
+gg <- st.object@meta.data[, c("pixel_x", "pixel_y")]
+p <- ggplot(xy.all, aes(col, 2000 - row)) +
+  geom_point(size = 0.1, color = "black") +
+  theme_void()
+p
+```
+
+If we calculate pairwise distances between spots and outline we can quickly find the minimum distance from a spot to the closest baseline. The issue is that many of the spots will be assigned to the wrong layers so we need to figure out a way to deal with this.
+
+```{r pair_dist, fig.width=6, fig.height=6}
+
+# Calculate pairwise distances
+set1 = spots[, c("pixel_x", "pixel_y")]
+set2 = xy.all[, 2:1]
+mindists <- apply(set1, 1, function(x) {
+  which.min(sqrt(colSums((t(set2) - x)^2)))
+})
+
+gg <- cbind(xy.all[mindists, ], spots)
+ggplot() +
+  geom_segment(data = gg, aes(x = col, xend = pixel_x, y = row, yend = pixel_y)) +
+  scale_y_reverse()
+
+```
+
+This far we have defined points outlining the base of the rolled colon but the points are not ordered. We want to order the points from proximal to distal (or vice versa) first to define the new coordinate system. 
+
+One way to do this is to define a k nearest neighbor graph, define the endpoints within the graph and then order points along the shortest path spanning from end point to endpoint. First, let's define a kNN graph with k = 5 and convert the graph into an igraph object.
+
+```{r knn_graph}
+
+library(dbscan)
+
+# Add a unique id for each spot
+xy.all$id <- paste0("id", 1:nrow(xy.all))
+rownames(xy.all) <- xy.all$id
+
+# Find k nearest neighbors
+y <- dbscan::kNN(x = xy.all[, 1:2], k = 5, sort = FALSE)
+
+# Create a data.frame in long format specifying the connections with their associated distances
+adj <- rbind(data.frame(from = xy.all$id, to = xy.all$id[y$id[, 1]], d = y$dist[, 1]),
+             data.frame(from = xy.all$id, to = xy.all$id[y$id[, 2]], d = y$dist[, 2]),
+             data.frame(from = xy.all$id, to = xy.all$id[y$id[, 3]], d = y$dist[, 3]),
+             data.frame(from = xy.all$id, to = xy.all$id[y$id[, 4]], d = y$dist[, 4]),
+             data.frame(from = xy.all$id, to = xy.all$id[y$id[, 5]], d = y$dist[, 5]))
+
+# Convert data.frame into an adjecency matrix
+adj.mat <- reshape2::acast(data = adj, formula = from ~ to, value.var = "d", fill = 0)
+
+# Convert adjacency matrix into igraph object
+ig <- igraph::graph_from_adjacency_matrix(adj.mat)
+
+```
+
+Next, we need to find the end points of the graph. 
+
+```{r find_end_points, fig.width=6.5, fig.height=6}
+
+# The end points should have the highest average distance to its neighbors
+end.points <- names(sort(rowMeans(y$dist), decreasing = TRUE))[1:2]
+
+rownames(xy.all) <- xy.all$id
+gg <- data.frame(xy.all)
+gg$hl <- ifelse(gg$id %in% end.points, gg$id, "")
+p <- ggplot() +
+  geom_point(data = gg, aes(col, row)) +
+  geom_text(data = gg, aes(col, row, label = hl)) +
+  theme_void()
+
+p
+
+```
+
+With the graph and the end points defined, we can now define a "shortest path" and reorder the points.
+
+```{r shortest_path, fig.width=5.5, fig.height=5}
+
+sp.full <- igraph::shortest_paths(graph = ig, 
+                          from = end.points[1], 
+                          to = end.points[2])
+
+xy.all <- xy.all[names(sp.full$vpath[[1]]), ]
+xy.all$ord <- 1:nrow(xy.all)
+
+p <- ggplot() +
+  geom_point(data = xy.all, aes(col, 2000 - row)) +
+  geom_label(data = xy.all[seq(1, nrow(xy.all), length.out = 40), ], aes(col, 2000 - row, label = ord)) +
+  theme_void()
+p
+
+```
+
+Now we need to assign each spot with a base layer point. For this we can use a function to determine on what side of the curve a spot it. If we "travel" along the base layer points, starting from position 1, we will check if a spot is located "inwards" by checking which side of the curve the spot falls on. Then, we will also claculate the angle of the spots location relative to the base layer point. If this angle falls within the desired range, the spot-base layer point pair is kept. 
+
+```{r estimate_LR, fig.width=8, fig.height=8}
+
+library(LearnGeom)
+
+adjust.coords <- function(x, y, P){
+  avg <- c(mean(c(x[1], y[1])), mean(c(x[2], y[2])))
+  df <- (P - avg)
+  x_new <- x - df
+  y_new <- y - df
+  return(c(x_new, y_new))
+} 
+sider <- function(x, y, P) {
+  (P[1] - x[1])*(y[2] - x[2]) - (P[2] - x[2])*(y[1] - x[1])
+}
+angle <- function(x, y, P){
+  Angle(A = P, B = c(mean(c(x[1], y[1])), mean(c(x[2], y[2]))), C = y)
+}
+sign_angle <- function(x, y, P) {
+  angle(x, y, P)*sign(sider(x, y, P))
+}
+expand.range <- function(x, exp.factor = 5, maxval = 1e4) {
+  y <- c(max(1, x - exp.factor), min(x + exp.factor, maxval))
+  return(y)
+}
+
+```
+
+Now we can apply our functions to all spots in the Visium dataset.
+
+```{r, fig.width=5, fig.height=5}
+
+library(dplyr)
+
+# Calculate pairwise distances
+set1 = spots[, c("pixel_x", "pixel_y")]
+set2 = xy.all[, 2:1]
+dists <- as.matrix(apply(set1, 1, function(x) {
+  sqrt(colSums((t(set2) - x)^2))
+}))
+
+spots.list <- do.call(rbind, pbmcapply::pbmclapply(colnames(dists), function(s) {
+  P <- spots[s, ]
+  dists.subset <- dists[, s]
+  dists.subset <- dists.subset[dists.subset < 80]
+  checks <- sapply(names(dists.subset), function(b) {
+    xs <- expand.range(xy.all[b, "ord"] %>% as.numeric(), 
+                     exp.factor = 5, maxval = nrow(xy.all))
+    xs <- xy.all[xs, ]
+    ls <- adjust.coords(x = as.numeric(xs[1, 2:1]), y = as.numeric(xs[2, 2:1]), P = as.numeric(P))
+    x <- ls[1:2]; y <- ls[3:4]
+    y <- sign_angle(x = x, y = y, P = as.numeric(P))
+    135 > y && y > 45
+  })
+  if (sum(checks) > 0) {
+    bl.subset <- dists.subset[checks]
+    return(data.frame(dist = bl.subset, id = names(bl.subset), spot = s))
+  } else {return(NULL)}
+}))
+
+spots.summarized <- spots.list %>%
+  group_by(spot) %>%
+  top_n(n = 1, wt = -dist)
+
+g <- merge(xy.all, spots.summarized, by = "id", all = T)
+g <- cbind(g, spots[g$spot, ])
+g <- na.omit(g)
+
+```
+
+```{r plot, fig.width=6.5, fig.height=6}
+
+im <- image_read("../data/V19S23-097_A1/spatial/tissue_hires_image.png") %>% as.raster()
+gr <- grid::rasterGrob(im, width = unit(1, "npc"), height = unit(1, "npc"), interpolate = TRUE)
+
+p <- ggplot() +
+  annotation_custom(gr, -Inf, Inf, -Inf, Inf) +
+   geom_point(data = g, aes(col, dim(im)[1]*0.3 - row), color = "red", size = 0.5) +
+  geom_point(data = g, aes(pixel_x, dim(im)[1]*0.3 - pixel_y), color = "blue", shape = 21, size = 1) +
+  geom_segment(data = g, aes(x = col, xend = pixel_x, y = dim(im)[1]*0.3 - row, yend = dim(im)[1]*0.3 - pixel_y), color = "black", size = 0.3) +
+  theme_void() +
+  scale_x_continuous(limits = c(0, dim(im)[2]*0.3), expand = c(0, 0)) +
+  scale_y_continuous(limits = c(0, dim(im)[1]*0.3), expand = c(0, 0))
+p
+
+```
+
+
+Some of the spots located near the distal colon are still assigned to the wrong base layer points. Here we can use our blocking layer to reassign these spots to the correct base layer points.
+
+```{r}
+
+open.spots <- subset(g, layer == 1)
+id_to_ord <- setNames(open.spots$ord, open.spots$id)
+id_to_ord <- id_to_ord[!duplicated(id_to_ord)]
+blocked.spots <- subset(g, layer == 2)
+blocked.spots.updated <- do.call(rbind, lapply(blocked.spots$spot, function(s) {
+  record <- blocked.spots[s, ]
+  nbs <- dists[, s]
+  #nbs <- nbs[nbs < 70]
+  nbs <- nbs[names(nbs) %in% names(id_to_ord)]
+  nbs <- nbs[names(sort(id_to_ord[names(nbs)], decreasing = T)[1:100])]
+  d <- data.frame(id = names(nbs), ord = id_to_ord[names(nbs)], dist = nbs)
+  d$df <- scales::rescale(d$ord) - scales::rescale(d$dist)
+  d <- d %>% top_n(wt = df, n = 1)
+  data.frame(id = d$id, row = xy.all[d$id, "row"], col = xy.all[d$id, "col"],
+             layer = xy.all[d$id, "layer"], ord = d$ord, dist = d$dist, 
+             spot = s, pixel_x = record$pixel_x, pixel_y = record$pixel_y)
+}))
+g.final <- rbind(open.spots, blocked.spots.updated)
+
+```
+
+
+```{r fig.width=6.5, fig.height=6}
+
+p <- ggplot() +
+   geom_point(data = g.final, aes(col, dim(im)[1]*0.3 - row), color = "red", size = 0.5) +
+  geom_point(data = g.final, aes(pixel_x, dim(im)[1]*0.3 - pixel_y), color = "blue", shape = 21, size = 1) +
+  geom_segment(data = g.final, aes(x = col, xend = pixel_x, y = dim(im)[1]*0.3 - row, yend = dim(im)[1]*0.3 - pixel_y), color = "black", size = 0.3) +
+  theme_void() +
+  scale_x_continuous(limits = c(0, dim(im)[2]*0.3), expand = c(0, 0)) +
+  scale_y_continuous(limits = c(0, dim(im)[1]*0.3), expand = c(0, 0))
+
+p
+
+```
+
+
+```{r plot_on_he, fig.width=6.5, fig.height=6}
+
+p <- ggplot() +
+  annotation_custom(gr, -Inf, Inf, -Inf, Inf) +
+   geom_point(data = g.final, aes(col, dim(im)[1]*0.3 - row), color = "red", size = 0.5) +
+  geom_point(data = g.final, aes(pixel_x, dim(im)[1]*0.3 - pixel_y), color = "blue", shape = 21, size = 1) +
+  geom_segment(data = g.final, aes(x = col, xend = pixel_x, y = dim(im)[1]*0.3 - row, yend = dim(im)[1]*0.3 - pixel_y), color = "black", size = 0.3) +
+  theme_void() +
+  scale_x_continuous(limits = c(0, dim(im)[2]*0.3), expand = c(0, 0)) +
+  scale_y_continuous(limits = c(0, dim(im)[1]*0.3), expand = c(0, 0))
+p
+
+```
+
+Now we can visualize expression in our unrolled coordinate system.
+
+```{r fig.width=10, fig.height=10}
+
+proximal <- c("Car1", "Mettl7b", "Emp1", "Fabp2")
+mid <- c("Retnlb", "Sprr2a2")
+distal <- c("Prdx6", "Tgm3", "Ly6g", "Eno3")
+ftrs <- c(proximal, mid, distal)
+
+ggs <- cbind(g, t(as.matrix(se.Colon@assays$SCT@data[ftrs, g$spot])))
+plotlist <- lapply(ftrs, function(ftr) {
+  ggs <- ggs[order(ggs[, ftr], decreasing = F), ]
+  p <- ggplot(ggs, aes_string("ord", "dist", z = paste0("`", ftr, "`"), 
+                              color = paste0("`", ftr, "`"))) + 
+    stat_summary_hex(binwidth = c(20, 3)) +
+    scale_fill_gradientn(colours = c("lightgray", "mistyrose", "red", "darkred")) +
+    theme_void() +
+    theme(
+          plot.margin = unit(c(0.1, 0.1, 0.1, 0.1), units = "cm")) +
+    labs(x = "position along colon", y = "thickness", title = ftr)
+})
+p <- cowplot::plot_grid(plotlist = plotlist, ncol = 2)
+p
+
+```
+
+```{r}
+
+ftrs <- c("Hmgcs2", "Ang4", "B4galt1")
+
+ggs <- cbind(g, t(as.matrix(se.Colon@assays$SCT@data[ftrs, g$spot])))
+plotlist <- lapply(ftrs, function(ftr) {
+  ggs <- ggs[order(ggs[, ftr], decreasing = F), ]
+  p <- ggplot(ggs, aes_string("ord", "dist", z = paste0("`", ftr, "`"), 
+                              color = paste0("`", ftr, "`"))) + 
+    stat_summary_hex(binwidth = c(20, 3)) +
+    scale_fill_gradientn(colours = c("lightgray", "mistyrose", "red", "darkred")) +
+    theme_void() +
+    theme(
+          plot.margin = unit(c(0.1, 0.1, 0.1, 0.1), units = "cm")) +
+    labs(x = "position along colon", y = "thickness", title = ftr)
+  return(p)
+})
+p <- egg::ggarrange(plots = plotlist, ncol = 1)
+p
+
+```
+
+```{r heatmap, fig.width=10, fig.height=4}
+
+proximal <- c("Car1", "Mettl7b", "Emp1", "Fabp2")
+mid <- c("Retnlb", "Sprr2a2")
+distal <- c("Prdx6", "Tgm3", "Ly6g", "Eno3")
+ftrs <- c(proximal, mid, distal)
+
+ggs <- reshape2::melt(cbind(g, t(se.Colon@assays$SCT@scale.data[ftrs, g$spot])), measure.vars = ftrs)
+rs <- ggs %>% mutate(bin = ntile(ord, 50)) %>%
+  group_by(bin, variable) %>%
+  summarize(avg  = mean(value)) %>%
+  group_by(variable) %>%
+  mutate(avg.norm = scales::rescale(avg, c(-1, 1)))
+
+p <- ggplot() + 
+  geom_tile(data = rs, aes(bin, variable, fill = avg.norm)) + 
+  scale_fill_gradientn(colours = RColorBrewer::brewer.pal(n = 11, name = "RdBu") %>% rev()) +
+  theme_minimal() +
+  theme(panel.grid = element_blank(), axis.text.x = element_blank()) +
+  labs(x = "", fill = "expression")
+
+p
+```
