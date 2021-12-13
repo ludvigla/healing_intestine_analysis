@@ -1,0 +1,133 @@
+---
+title: "GWAS_co_expression"
+author: "Ludvig Larsson"
+date: "8/31/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load_libs, message=FALSE, warning=FALSE}
+#library(STutility)
+library(openxlsx)
+library(biomaRt)
+library(spdep)
+```
+
+### Read data
+
+Read list of IBD risk genes from excel file. Some genes were missing in the MGI (mouse gene symbol) column so I ran them against biomaRt to get a few more. 
+
+```{r read_GWAS_genes}
+
+se.Colon <- readRDS("../R_objects/se.Colon")
+xl <- openxlsx::read.xlsx("../annotation/IBD_risk_genes_in_VISIUM_long_format.xlsx")
+human = useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+mouse = useMart("ensembl", dataset = "mmusculus_gene_ensembl")
+genesV2 = getLDS(attributes = c("mgi_symbol"), 
+                 filters = "mgi_symbol", 
+                 values = xl$gene_human, 
+                 mart = mouse, 
+                 attributesL = c("hgnc_symbol"), 
+                 martL = human, 
+                 uniqueRows = T)
+genesV2.convert <- setNames(genesV2$MGI.symbol, nm = genesV2$HGNC.symbol)
+xl$mouse_ext <- ifelse(xl$gene_human %in% names(genesV2.convert), genesV2.convert[xl$gene_human], xl$gene_mouse)
+xl <- subset(xl, !mouse_ext %in% "-")
+xl <- xl[!duplicated(xl$mouse_ext), ]
+rownames(xl) <- xl$mouse_ext
+xl <- xl[intersect(xl$gene_mouse, rownames(se.Colon)), ]
+
+cat("Number of GWAS genes left after filtering: ", nrow(xl), "\n")
+
+```
+
+## Find co-expressed genes
+
+Here we compute the correlation matrix using normalized expression data subsetted by the IBD risk genes.
+
+  * compute correlation matrix
+  * set diagonal to 0
+  * compute a distance matrix (euclidean) based on the correlation matrix
+  * create a dendrogram with hclust
+  * cut dendrogram into 3 clusters
+  * Co-expression cluster 3 stands out a bit from the other two clusters. Co-expression cluster 1 correlated with co-expression cluster 3 but has a pretty week “within”   * correlation. These are probably more lowly expressed genes.
+
+```{r cor, fig.width=8, fig.height=7}
+
+scale.data <- GetAssayData(se.Colon, slot = "scale.data")
+corMat <- cor(t(scale.data[xl$gene_mouse, ]))
+diag(corMat) <- 0
+d <- dist(corMat)
+tree <- hclust(d, method = "ward.D2")
+clusters <- cutree(tree, k = 3)
+corMat <- corMat[names(sort(clusters, decreasing = T)), names(sort(clusters, decreasing = T))]
+
+ann <- data.frame(clusters = sort(clusters, decreasing = T), row.names = colnames(corMat))
+pheatmap::pheatmap(corMat, border_color = NA, annotation_col = ann, cluster_rows = F, cluster_cols = F, fontsize = 6)
+
+```
+
+We can compute a modulescore using the genes from co-expression cluster 3, to see where this group is active in the tissue.
+
+```{r fig.width=8, fig.height=4}
+
+cat("Genes includes in co-expression cluster 3:\n", paste(names(clusters[clusters == 3]), collapse = "\n"), "\n", sep = "")
+se.Colon <- AddModuleScore(se.Colon, features = list(IBD = names(clusters[clusters == 3])), name = "IBD")
+p <- ST.FeaturePlot(se.Colon, features = "IBD1", show.sb = F, cols = c("lightgray", "mistyrose", "red", "darkred"), pt.size = 1.1, ncol = 2) & 
+  theme(plot.title = element_blank(), 
+        plot.margin = margin(0,0,0,0,"cm"), 
+        strip.text = element_blank()) & labs(fill = "score")
+p
+```
+
+## GSEA factors
+
+Here I have used the factors as a basis to check where the IBD risk genes are overrepresented. First we collect the “feature loadings” of each factor, i.e. the wights associated to each gene for each factor. Using these weights we can then compute a GSEA score for the IBD risk gene set for each factor.
+
+1. collect and sort the feature loadings vectors
+2. define the IBD risk genes as a “pathway”
+3. Compute the GSEA scores for each factor
+4. summarize output in a table
+
+```{r}
+
+library(fgsea)
+
+RankList <- lapply(1:20, function(i) {
+  sort(se.Colon@reductions$NMF@feature.loadings[, i])
+})
+
+pathways <- list(IBD = xl$gene_mouse)
+
+fgseaRes <- lapply(1:20, function(i) {
+  fgsea(pathways = pathways, 
+                  stats    = RankList[[i]],
+                  minSize  = 15,
+                  maxSize  = 500)
+})
+fgseaRes <- do.call(rbind, fgseaRes)
+fgseaRes
+
+```
+
+The only factor with a significant p-value (0.01245297) for the enrichment of IBD risk genes is factor 9. 
+
+```{r fig.width=8, fig.height=4}
+
+ST.DimPlot(se.Colon, dims = 9, reduction = "NMF", center.zero = F, cols = rev(viridis::magma(n = 9)), show.sb = FALSE, pt.size = 1.5, ncol = 2)
+
+```
+## Session info
+
+```{r session}
+sessionInfo()
+```
+
+## Date
+
+```{r date}
+date()
+```
