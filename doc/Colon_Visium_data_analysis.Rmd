@@ -1,0 +1,595 @@
+---
+title: "Analysis of Colon Visium data"
+author: "Ludvig Larsson"
+date: "4/17/2020"
+output:
+  html_document:
+    number_sections: false
+    toc: yes
+    toc_depth: 3
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+---
+
+<style type="text/css">
+div.main-container {
+  max-width: 1800px;
+  margin-left: 20px;
+  margin-right: 20px;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+***
+
+Package notes:
+Make sure that v3.1.5 of Seurat and v0.2.1 of sctransform is installed to obtain reproducible results.
+
+In this notebook I have made some exploratory analyses of Colon data from treated (d14) and untreated (d0) mice. I have tried to provide explanations of the different analyses as well as some introduction to the various functionalities of the STUtility R package.
+
+## Load libraries
+***
+
+Here I have listed all the libraries used for this analysis. STUtility is an R package developed in our lab and can be downloaded from github [here](https://github.com/jbergenstrahle/STUtility).
+
+```{r load_libs, warning=FALSE, message=FALSE}
+
+library(STutility)
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(magrittr)
+library(zeallot)
+
+```
+
+STUtility can be used to create a Seurat object from a set of files which can be collected from the SpaceRanger output folders. The required filer are; "filtered_feature_bc_matrix.h5", "tissue_hires_image.png", "scalefactors_json.json" and "tissue_positions_list.csv"
+
+STUtility recognizes a data.frame with these files supplied as columns named; "samples", "imgs", "json" and "spotfiles"
+
+You can also add additional meta data to the data.frame as separate columns, which will be leveraged into the meta.data slot of the Seurat object. Here I have added a column called "tissue" specifying whether the tissue sections comes from small intestine (SI) or Colon and another column called day to specify the day post treatment.
+
+```{r prepare_data}
+
+samples <- list.files(pattern = "filtered", path = "../data", recursive = T, full.names = T)
+json <- list.files(pattern = "scalefactors", path = "../data", recursive = T, full.names = T)
+imgs <- list.files(pattern = "tif", path = "../data", recursive = T, full.names = T)
+spotfiles <- list.files(pattern = "tissue_positions", path = "../data", recursive = T, full.names = T)
+
+infoTable <- data.frame(samples, imgs, json, spotfiles, 
+                        tissue = c("Colon", "Colon"), 
+                        day = c("d0", "d14"), stringsAsFactors = F)
+
+```
+
+The `InputFromTable` function can then be used to read the files and create a `Seurat` object. Here you can add additional filters to remove spots with low counts/genes or genes with low expression for example. 
+
+```{r create_seurat}
+
+se.Colon <- InputFromTable(infoTable, scaleVisium = 1)
+
+```
+
+## Filtering
+***
+
+I noticed when looking at these datasets that there are some highly variable genes in the dataset which looks like they are confounding the signal. These genes are typically mitochondrial protein coding genes and lncRNA such as Malat1. I have seen in many datasets, especially datasets with reduced quality, that these genes can affect the analysis and produce patterns that looks like they are of a more "technical" nature. For this reason I have decided to enrich the dataset for genes that are belong to one of the following biotypes;
+
+"protein_coding", "TR_V_gene", "TR_D_gene", "TR_J_gene", "TR_C_gene", "IG_LV_gene", "IG_V_gene", "IG_J_gene", "IG_C_gene" or "IG_D_gene"
+
+meaning that ncRNAs such as lncRNA have been excluded. I have also filtered out mitochondrial protein coding genes, i.e. any gene starting with the prefix "mt-".
+
+```{r filter_data}
+
+ensids <- read.table("../annotation/mm10_genes.tsv", header = TRUE, stringsAsFactors = FALSE)
+rownames(ensids) <- ensids$gene_name
+
+gene_attr <- data.frame(gene = rownames(se.Colon), biotype = ensids[rownames(se.Colon), ]$gene_biotype, count = Matrix::rowSums(se.Colon@assays$RNA@counts))
+gene_attr.summarized <- gene_attr %>% group_by(biotype) %>%
+  summarize(count = sum(count)) %>%
+  ungroup() %>%
+  mutate(count = count/sum(count))
+
+p <- ggplot(gene_attr.summarized, aes(x = "", y = count, fill = biotype)) +
+  geom_bar(width = 1, stat = "identity") +
+  coord_polar("y", start = 0) +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = "", y = "")
+p
+```
+
+```{r filter}
+
+## Define what biotypes to keep
+#bio.keep <- c("protein_coding", "TR_V_gene", "TR_D_gene", "TR_J_gene", "TR_C_gene", "IG_LV_gene", "IG_V_gene", "IG_J_gene", "IG_C_gene", #"IG_D_gene")
+#genes.keep <- intersect(rownames(se.Colon), subset(ensids, gene_biotype %in% bio.keep)$gene_name)
+#
+## Define what genes to remove
+#genes.remove <- grep(pattern = "^mt-", x = rownames(se.Colon), value = TRUE)
+#
+## Define what genes to keep
+#genes.keep <- setdiff(genes.keep, genes.remove)
+#
+## Filter data
+#se.Colon <- se.Colon[genes.keep, ]
+#se.Colon$nFeature_RNA <- Matrix::colSums(se.Colon@assays$RNA@counts > 0)
+#se.Colon$nCounts_RNA <- Matrix::colSums(se.Colon@assays$RNA@counts)
+
+```
+
+Now we can already plot feature values as spatial heatmaps; e.g. we can plot the total number of genes per spot or some selected gene.
+
+```{r plot_features, fig.width=7, fig.height=7}
+
+ST.FeaturePlot(se.Colon, c("nFeature_RNA", "Col1a1"), ncol = 4, grid.ncol = 1, palette = "Spectral")
+
+```
+
+The number of unique genes per spot (nFeature_RNA) appears to be quite reproducible across the four tissue sections. We can also visualize features, for example as violin plots which is typically easier to compare between sections. Here we can see that section 4 from SI has quite low stats compared to the others. This will probbaly influence downstream analysis because biological variablity could be confounded by the difference in quality. For the Colon data, this looks much better!
+
+For the SI sections, we cannot really run a batch correction to correct for these differencies without removing the biological variability, i.e. the day after treatment. 
+
+```{r qc_violin, fig.width=8, fig.height=4}
+
+se.Colon$sample_id <- paste0("sample_", GetStaffli(se.Colon)@meta.data$sample)
+se.Colon <- SetIdent(se.Colon, value = "day")
+p <- VlnPlot(se.Colon, features = c("nFeature_RNA", "nCount_RNA"), ncol = 2, pt.size = 0.5)
+p
+
+```
+
+So far we can only draw the spots on the capture area coordinates without the HE image. To draw on the images we need to load them using `LoadImages`.
+
+```{r loadimages}
+
+se.Colon <- LoadImages(se.Colon, time.resolve = FALSE, crop.to.fiducials = TRUE, crop.scale.factors = c(9, 8, 10, 8), xdim = 2e3)
+
+```
+
+## Normalization
+***
+
+I usually run the normalization to return all genes by setting `return.only.var.genes = FALSE` otherwise we will only get the top 3000 most variable genes i the "scale.data" slot. Also, instead of setting the top 3000 genes as the most variable features (which will be used in downstream steps for dimensionality reduction etc.) I have set a cutoff threshold based on the residual variance (`variable.features.n = NULL`and `variable.features.rv.th = 1.1`). 
+
+```{r analysis_wf, eval=FALSE, include=TRUE}
+
+se.Colon <- se.Colon %>% SCTransform(return.only.var.genes = FALSE, variable.features.n = NULL, variable.features.rv.th = 1.1)
+
+```
+
+We can plot the raw HE images using the `ImagePlot` function. By default, this function will draw the images in the Viewer panel if you're running RStudio, but setting `method = "raster"` will draw them as a plot instead. They look a little bit strange because they have been rotated perhaps? :-/ The image dimensions are a bit odd which will make the plots look a bit squeezed unfortunately. 
+
+```{r plot_images, fig.width=12, fig.height=6, out.width="100%"}
+
+ImagePlot(se.Colon, method = "raster")
+
+```
+
+Now we can also draw features on top of the HE images using the `Overlay` functions.
+
+```{r ftr_overlay, fig.width=12.5, fig.height=6}
+
+FeatureOverlay(se.Colon, sampleids = 1:2, features = "Col1a1", ncols = 2, palette = "Spectral")
+
+```
+
+## Dimensionality reduction
+***
+
+Non-negative Matrix Factorization is a method used in multivariate analysis where a matrix V is factorized into two matrices W and H, with the property that all three matrices have non-negative elements. A gene expression matrix V can be decomposed into a predefined set of factors to produce a matrix A of spot embeddings and a matrix for gene loadings H. The matrix W contains 1 vector for each factor with a value for that factor in each spot. Similarly, the matrix H contains a vector for each factor with a value for each gene which can be used to rank genes based on its contribution to the factor. The factors can typically pick up relevant sources of variability in the data, s.a. cell types and expression pathways. Compared to methods s.a. PCA, the NMF method produce "reduced dimensions" which are easier to interpret, partly because the values are strictly positive.
+
+The NMF method can be run using the `RunNMF` function in STUtility and the results are stored in the "reductions" list in the Seurat object under the name "NMF". 
+
+```{r nmf, eval=FALSE}
+
+se.Colon <- RunNMF(se.Colon, nfactors = 20)
+
+```
+
+And now we can use the `ST.DimPlot()` and `DimOverlay()` functions to visualize the extivity of the factors.
+
+```{r NMF_plots, fig.width=14, fig.height=36}
+
+ST.DimPlot(se.Colon, dims = 1:20, ncol = 2, reduction = "NMF", grid.ncol = 2, cols = viridis::magma(n = 9) %>% rev(), center.zero = F, show.sb = FALSE)
+
+```
+
+We could already try to run a pathway analysis on the top contributing genes per factor. The way I have done this is to convert each feature loading vector using a log-transformation which should give and then setting the threshold to mean(log(factor-values)) + 2*sd(log(factor-values)). Then I have selected all genes with a value higher than this threshold to define a set of the top most contributing gene per factor. This set of genes has then been used as input for the pathway analysis, where I have used the GO biological processes database for terms.
+
+```{r feature_extraction}
+
+source("../scripts/gaussian_smoothing.R")
+library(inflection)
+
+# inflexion point selection
+top.genes <- lapply(1:20, function(i) {
+  vals <- se.Colon@reductions$NMF@feature.loadings[, i]
+  gg <- data.frame(x = 1:length(vals), vals = sort(vals, decreasing = T))
+  gg$gene <- rownames(gg)
+  gg <- subset(gg, vals > 0)
+  gg$logvals <- log(gg$vals)
+  gg$smooth_logvals <- smth.gaussian(x = gg$logvals, windowLength = 10)
+  ggs <- gg[1:500, ]
+  knee <- uik(x = ggs$x, y = ggs$smooth_logvals)
+  ggs[1:knee, ]$gene
+})
+
+# Load gprofiler2
+library(gprofiler2)
+
+pathways <- lapply(seq_along(top.genes), function(i) {
+  gset <- top.genes[[i]]
+  df <- gost(query = gset, organism = "mmusculus", sources = "GO:BP")$result
+  if (is.null(df)) return(NULL)
+  df$factor <- paste0("factor_", i)
+  return(df)
+})
+pathways <- do.call(rbind, pathways)
+pathways$GeneRatio <- pathways$intersection_size/pathways$query_size
+pathways.summarized <- pathways %>% 
+  group_by(factor) %>%
+  top_n(n = 20, wt = -log10(p_value))
+
+p.list <- lapply(1:20, function(i) {
+  if (!paste0("factor_", i) %in% pathways.summarized$factor) return(NULL)
+  ggplot() +
+    geom_point(data = subset(pathways.summarized, factor %in% paste0("factor_", i)), aes(reorder(term_name, -log10(p_value)), -log10(p_value), fill = -log10(p_value), size = GeneRatio), color = "black", shape = 21) +
+    coord_flip() +
+    facet_grid(~factor) +
+    scale_size_continuous(range = c(0.5, 8)) +
+    scale_fill_gradientn(colours = viridis::magma(n = 9) %>% rev()) +
+    theme_minimal() +
+    labs(x = "term", y = "")
+})
+
+p.list[[1]]
+
+```
+
+Here is a summary table of all the selected genes used for pathway analysis. You should be able to search for any factor and get a list of all the genes that were selected for pwathay analysis. The "rank" column indicates the rank of the genes based on it's factor value.
+
+```{r pathway_genes}
+
+dt <- do.call(rbind, lapply(seq_along(top.genes), function(i) {
+  data.frame(gene = top.genes[[i]], factor = paste0("factor_", i), value = se.Colon@reductions$NMF@feature.loadings[top.genes[[i]], i], rank = 1:length(top.genes[[i]]))
+}))
+DT::datatable(dt)
+
+```
+
+Another way that we can visualize the results is to color code each spot based on it's gene expression profile. Here I have embedded the data in 3 dimensions using UMAP. Then I have rescaled the values of these 3 dimensions into a unit cube (with a range of 0 to 1) and used these scaled values as channels in CMYK color space to produce a color for each spot. Here we can see that the most similar regions overall appear to be the proximal colon as well as the follicles.
+
+```{r CMYK_plot, fig.width=12, fig.height=6, out.width="100%"}
+
+source("../scripts/CMYK.R")
+
+se.Colon <- RunUMAP(se.Colon, dims = 1:20, reduction = "NMF", reduction.name = "umap.3d", n.components = 3, reduction.key = "UMAP3D_")
+
+dims <- 1:3
+um <- se.Colon[["umap.3d"]]@cell.embeddings
+signs <- sign(dims)
+um <- um[, abs(dims)]
+um <- t(t(um)*signs)
+um <- apply(um, 2, scales::rescale, c(0, 100))
+cols <- apply(um, 1, function(x) {
+  cmyk(C = x[1], M = x[2], Y = x[3], K = 0)
+})
+
+d <- data.frame(cols, row.names = names(cols))
+FeatureOverlay(se.Colon, spot.colors = d, sampleids = 1:2, ncols = 2, pt.size = 3)
+
+```
+
+
+### UMAP
+***
+
+We can run UMAP on any dimensionality reduction output. Here I have set `reduction = "NMF"` to run the UMAP on the NMF spot embeddings. If we plot the UMAP and color by sample id we can see that the two datasets are quite distinct from each other except for some smaller sets of spots.
+
+```{r run_umap, eval=FALSE, fig.width=7, fig.height=6}
+
+se.Colon <- RunUMAP(se.Colon, dims = 1:20, reduction = "NMF", n.epochs = 1e3, n.neighbors = 50)
+se.Colon <- SetIdent(se.Colon, value = "sample_id")
+DimPlot(se.Colon, reduction = "umap")
+
+```
+
+## Separate analysis of d0 and d14
+***
+
+Because the datasets are so different, we will probably benefit from analyzing them separately and get a more fine grained clustering.
+
+```{r clusters_low_res, eval=FALSE}
+
+se.Colon.split <- lapply(1:2, function(i) {
+  SubsetSTData(se.Colon, spots = rownames(subset(se.Colon[[]], sample_id %in% paste0("sample_", i)))) %>% 
+    SCTransform() %>%
+    RunNMF(nfactors = 20)
+})
+
+```
+
+Functional enrichment analysis for d0 only.
+
+```{r feature_extraction}
+
+# inflexion point selection
+top.genes <- lapply(1:20, function(i) {
+  vals <- se.Colon.split[[1]]@reductions$NMF@feature.loadings[, i]
+  gg <- data.frame(x = 1:length(vals), vals = sort(vals, decreasing = T))
+  gg$gene <- rownames(gg)
+  gg <- subset(gg, vals > 0)
+  gg$logvals <- log(gg$vals)
+  gg$smooth_logvals <- smth.gaussian(x = gg$logvals, windowLength = 10)
+  ggs <- gg[1:500, ]
+  knee <- uik(x = ggs$x, y = ggs$smooth_logvals)
+  ggs[1:knee, ]$gene
+})
+
+pathways <- lapply(seq_along(top.genes), function(i) {
+  gset <- top.genes[[i]]
+  df <- gost(query = gset, organism = "mmusculus", sources = "GO:BP")$result
+  if (is.null(df)) return(NULL)
+  df$factor <- paste0("factor_", i)
+  return(df)
+})
+pathways <- do.call(rbind, pathways)
+pathways$GeneRatio <- pathways$intersection_size/pathways$query_size
+pathways.summarized <- pathways %>% 
+  group_by(factor) %>%
+  top_n(n = 20, wt = -log10(p_value))
+
+p.list <- lapply(1:20, function(i) {
+  if (!paste0("factor_", i) %in% pathways.summarized$factor) return(NULL)
+  g <- subset(pathways.summarized, factor %in% paste0("factor_", i))
+  g$term_name <- ifelse(nchar(g$term_name) > 40, paste0(substr(g$term_name, start = 1, stop = 40), "..."), g$term_name)
+  ggplot() +
+    geom_point(data = g, aes(reorder(term_name, -log10(p_value)), -log10(p_value), fill = -log10(p_value), size = GeneRatio), color = "black", shape = 21) +
+    coord_flip() +
+    facet_grid(~factor) +
+    scale_size_continuous(range = c(0.5, 8)) +
+    scale_fill_gradientn(colours = viridis::magma(n = 9) %>% rev()) +
+    theme_minimal() +
+    labs(x = "term", y = "")
+})
+
+p.list[[1]]
+
+```
+
+## Basic patterns
+***
+
+Here I have run the NNMF method using only 3 factors to capture the most basic structures of the colon. Turns out that this gives us the Laminar Propria (LP), Intestinal Epithelial Cells (IEC) and muscle. We can of course also cluster the spots instead, but I think this looks pretty neat already. Also, when clustering the data I think it was much more difficult to get a clear distinction betwen the three layers.
+
+I have also used a subset of the most variable features where ribosomal protein genes (RPL* and RPS*) have been excluded.
+
+
+```{r nmf_3_factors, eval=FALSE}
+
+se.d0 <- se.Colon.split[[1]]
+ribo.genes <- grep(pattern = "^Rpl|^Rps", x = rownames(se.d0), value = TRUE)
+se.d0 <- RunNMF(se.d0, nfactors = 3, features = setdiff(VariableFeatures(se.d0), ribo.genes), reduction.name = "nmf.3", reduction.key = "NMF3_")
+```
+
+```{r nmf_3_factors_plot, fig.width=14, fig.height=10, out.width="100%"}
+
+p1 <- ST.DimPlot(se.d0, dims = 1:3, center.zero = F, cols = c("dark blue", "cyan", "yellow", "red", "dark red"), reduction = "nmf.3", blend = T, pt.size = 3, dark.theme = F, max.cutoff = "q99")
+se.d0@reductions$NMF <- se.d0@reductions$nmf.3
+c(df1, df2) %<-% SummarizeAssocFeatures(se.d0, features.return = 20)
+p2 <- swne::ggHeat(df2[, ], rescaling = "column") + scale_fill_gradientn(colours = viridis::magma(n = 9) %>% rev())
+
+cowplot::plot_grid(p1, p2, rel_widths = c(2, 1))
+
+```
+
+
+```{r nmf3_one_by_one, fig.width=18, fig.height=6, out.width="100%"}
+
+DimOverlay(se.d0, dims = 1:3, reduction = "nmf.3", center.zero = FALSE, add.alpha = TRUE, cols = c("dark blue", "cyan", "yellow", "red", "dark red"), pt.size = 2)
+
+```
+
+Let's explore the factors by plotting them on the array coordinates and checking the top most contributing genes. In some cases you can see that the factor analysis pick up signal which appears to be technical rather than biological. For example, factor_10 from d0 have a patterns that splits the tissue into two parts and doesn't really align with along the colon like the other factors do. We could see before in the QC plot that the left part of the tissue had much lower total gene counts which is likely a sign of degradation. Degradation will weaken the signal and could confound downstream analysis s.a. clustering and DE-analysis. We could try to diminish the effect of this degradation by excluding factor_15 from downstream steps.
+
+If we compute a correlation score between the factors and the total number of unique genes per spots, we can actually see that factor_10 is negatively correlated (-0.5) with the number of unique genes per spot.
+
+```{r nmf_spatial_plots, fig.width=15, fig.height=15, out.width="100%"}
+
+ST.DimPlot(se.Colon.split[[1]], dims = 1:20, center.zero = FALSE, show.sb = FALSE,
+           reduction = "NMF", cols = viridis::magma(n = 9) %>% rev(), 
+           pt.size = 0.7, grid.ncol = 4)
+ST.DimPlot(se.Colon.split[[2]], dims = 1:20, center.zero = FALSE, show.sb = FALSE,
+           reduction = "NMF", cols = viridis::magma(n = 9) %>% rev(), 
+           pt.size = 0.7, grid.ncol = 4)
+
+# calculate correlation of each factor with the total number of genes
+cors <- c()
+for (i in 1:20) {
+  cors <- c(cors, cor(se.Colon.split[[1]]@reductions$NMF@cell.embeddings[, i], se.Colon.split[[1]]$nFeature_RNA))
+}
+which.min(cors)
+min(cors)
+
+```
+
+Below we can see the top 6 most contributing genes per factor. I have also selected a subset of factors to keep for downstream steps (see `selected.dims`). Interestingly, the signatures in d14 are clearer than the signatures in d0, which I think could be explained by the fact that the data quality and heterogeneity is higher in d14.
+
+This heatmap is useful as an overview, but I have also exported plots of each factor so that they can be evaluated in more detail.
+
+```{r nmf_heatmap, fig.width=8, fig.height=12, out.width="100%"}
+
+library(zeallot)
+c(df1, df2) %<-% STutility::SummarizeAssocFeatures(se.Colon.split[[1]], features.return = 6)
+p1 <- swne::ggHeat(df2[nrow(df2):1, ], rescaling = "column") + 
+  scale_fill_gradientn(colours = viridis::magma(n = 9) %>% rev()) + 
+  ggtitle("d0")
+p1
+
+c(df1, df2) %<-% STutility::SummarizeAssocFeatures(se.Colon.split[[2]], features.return = 6)
+p2 <- swne::ggHeat(df2[nrow(df2):1, ], rescaling = "column") + 
+  scale_fill_gradientn(colours = viridis::magma(n = 9) %>% rev()) +  
+  ggtitle("d14")
+p2
+
+selected.dims <- list(
+  c(setdiff(1:20, 10)),
+  c(1:20)
+)
+
+```
+
+
+# Data integration
+***
+
+For data integration across time points I have used harmony. After running harmony, dimensionality reduction results was used for clustering `FindNeighbors` and `FindClusters`.
+
+```{r harmony, fig.width=13, fig.height=6, eval=FALSE}
+
+library(harmony)
+se.Colon <- RunPCA(se.Colon)
+DefaultAssay(se.Colon) <- "SCT"
+se.Colon.integrated <- RunHarmony(object = se.Colon, group.by.vars = "day", assay.use = "SCT")
+se.Colon.integrated <- RunUMAP(se.Colon.integrated, reduction = "harmony", dims = 1:20, reduction.name = "umap.harmony", n.epochs = 1e3)
+se.Colon.integrated <- FindNeighbors(se.Colon.integrated, reduction = "harmony", dims = 1:20, force.recalc = T) 
+se.Colon.integrated <- FindClusters(se.Colon.integrated, graph.name = "SCT_snn", resolution = 0.8)
+
+meta.data <- cbind(se.Colon.integrated@meta.data[, c("day", "SCT_snn_res.0.8")], GetStaffli(se.Colon.integrated)@meta.data[, 1:6])
+
+```
+
+
+```{r plot_harmony, fig.width=13, fig.height=6}
+
+se.Colon.integrated <- SetIdent(se.Colon.integrated, value = "day")
+p1 <- DimPlot(se.Colon.integrated, reduction = "umap.harmony")
+se.Colon.integrated <- SetIdent(se.Colon.integrated, value = "SCT_snn_res.0.8")
+p2 <- DimPlot(se.Colon.integrated, reduction = "umap.harmony")
+cowplot::plot_grid(p1, p2)
+
+se.Colon.integrated <- SetIdent(se.Colon.integrated, value = "day")
+DimPlot(se.Colon.integrated, reduction = "umap.harmony", split.by = "day")
+
+```
+
+Now we can plot the clusters defined across the two conditions. Overall, the clusters overlap pretty nicely, maybe with the exception of the damaged area which is only present in d14.
+
+```{r compare_clusters, fig.width=14, fig.height=6, out.width="100%"}
+
+ClusterPlotter <- function(object, cluster = "0") {
+  FeatureOverlay(object, sampleids = 1:2, features = "SCT_snn_res.0.8", spots = rownames(subset(object[[]], SCT_snn_res.0.8 %in% cluster)), pt.size = 1.8, ncols = 2)
+}
+
+ClusterPlotter(object = se.Colon.integrated, cluster = "0") %>% print()
+
+```
+
+## DE analysis of integrated clusters
+***
+
+Now that we have defined clusters overlapping the two conditions, we can again split the data and run a DE test for each cluster. The DE test is performed pairwise by contrasting a cluster to its background, e.g. cluster "0" vs all lother spots, cluster "1" vs all other spots, ...
+
+Once we have all the marker genes, I have applied a filter to include genes with an adjusted p-value < 0.01 and a log-foldchange > 0.25. 
+
+```{r split_integrated}
+
+se.Colon.integrated.split <- lapply(c("d0", "d14"), function(d) {
+  se.subset <- SubsetSTData(se.Colon.integrated, spots = rownames(subset(se.Colon.integrated[[]], day %in% d)))
+})
+
+```
+
+```{r de_integrated, eval=FALSE}
+
+de.integrated.split <- lapply(se.Colon.integrated.split, function(se) {
+  se <- SetIdent(se, value = "SCT_snn_res.0.8")
+  FindAllMarkers(se, only.pos = TRUE)
+})
+
+```
+
+```{r filtered}
+
+de.integrated.split.filtered <- lapply(de.integrated.split, function(de) {
+  de %>% group_by(cluster) %>%
+    filter(avg_logFC > 0 & p_val_adj < 0.01) %>%
+    arrange(cluster, p_val_adj) 
+})
+
+intersecting.markers <- setNames(lapply(1:17, function(i) {
+  set1 <- subset(de.integrated.split.filtered[[1]], cluster %in% paste0(i - 1))[, c(2:5, 7)]
+  colnames(set1)[1:4] <- paste0("d0_", colnames(set1)[1:4])
+  set1$d0_rank <- 1:nrow(set1)
+  set2 <- subset(de.integrated.split.filtered[[2]], cluster %in% paste0(i - 1))[, c(2:5, 7)]
+  
+  if (nrow(set2) == 0) {
+    mrg <- set1
+  } else {
+    colnames(set2)[1:4] <- paste0("d14_", colnames(set2)[1:4])
+  set2$d14_rank <- 1:nrow(set2)
+    mrg <- merge(set1, set2, by = "gene", all = TRUE) %>% arrange(d0_p_val_adj)
+    mrg$upregulated_in <- ifelse(is.na(mrg$d0_rank), "d14", ifelse(is.na(mrg$d14_rank), "d0", "both"))
+    mrg$cluster <- paste0(i - 1)
+  }
+  print(dim(mrg))
+  return(mrg)
+}), nm = paste0(0:16))
+
+```
+
+Here, I have summarized some of the results as a heatmap of scaled expression values. The genes have been selected for each cluster the following way:
+
+1. Find genes that are up-regulated in both conditions (d0 and d14)
+2. select top 10 genes (if > 10 genes are available)
+
+```{r de_heatmap, fig.width=8, fig.height=16}
+
+intersecting.markers <- do.call(plyr::rbind.fill, intersecting.markers)
+im <- subset(intersecting.markers, upregulated_in %in% "both") %>%
+    group_by(cluster) %>%
+    top_n(n = 10, wt = -d0_p_val_adj)
+im <- im$gene
+heatmap.dfs <- lapply(seq_along(de.integrated.split), function(i) {
+  se <- se.Colon.integrated.split[[i]]
+  group.var <- se$SCT_snn_res.0.8
+  scale.data <- se@assays$SCT@scale.data
+  gene_attr <- t(rowsum(x = t(scale.data[unique(im), ]), group = group.var))
+  return(gene_attr)
+})
+
+d <- list()
+for (i in 1:17) {
+  d <- c(d, data.frame(heatmap.dfs[[1]][, i], heatmap.dfs[[2]][, i]))
+}
+d <- do.call(cbind, d)
+d <- setNames(as.data.frame(d), nm = paste0(rep(0:16, each = 2), "_", rep(c("d0", "d14", times = 17))))
+rownames(d) <- unique(im)
+ann <- data.frame(condition = rep(c("d0", "d14"), times = 17), row.names = colnames(d))
+p <- pheatmap::pheatmap(scale(d), cluster_rows = F, cluster_cols = F, breaks = seq(-4.5, 4.5, length.out = 51), color = colorRampPalette(RColorBrewer::brewer.pal(n = 11, name = "RdBu") %>% rev())(50), border_color = NA, annotation_col = ann)
+p
+
+```
+
+# Date
+***
+
+```{r date}
+date()
+```
+
+# Session Info
+***
+
+```{r sessioninfo}
+
+sessionInfo()
+
+```
+

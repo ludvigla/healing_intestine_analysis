@@ -1,0 +1,2 @@
+data/V19S23-097_A1/V19S23-097_A1_Region1_colon_d0_rotated.tif filter=lfs diff=lfs merge=lfs -text
+data/V19S23-097_B1/V19523-097_B1_Region2_colon_d14_rotated.tif filter=lfs diff=lfs merge=lfs -text
