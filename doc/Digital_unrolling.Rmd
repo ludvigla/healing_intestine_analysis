@@ -22,17 +22,45 @@ library(magick)
 library(imager)
 library(STutility)
 library(zeallot)
+library(magrittr)
+library(dplyr)
+library(dbscan)
+# Additional package required: pbmcapply
 
 ```
 
-```{r load_data}
-se.Colon <- readRDS("../R_objects/se.Colon")
+```{r prepare_data}
+
+samples <- list.files(pattern = "filtered", path = "../data", recursive = T, full.names = T)
+json <- list.files(pattern = "scalefactors", path = "../data", recursive = T, full.names = T)
+imgs <- list.files(pattern = "tif", path = "../data", recursive = T, full.names = T)
+spotfiles <- list.files(pattern = "tissue_positions", path = "../data", recursive = T, full.names = T)
+
+infoTable <- data.frame(samples, imgs, json, spotfiles, 
+                        tissue = c("Colon", "Colon"), 
+                        day = c("d0", "d14"), stringsAsFactors = F)
+
+```
+
+The `InputFromTable` function can then be used to read the files and create a `Seurat` object. Here you can add additional filters to remove spots with low counts/genes or genes with low expression for example. Please look at the "Colon_Visium_data_analysis.Rmd" for more details on how to run the full analysis workflow including normalization, dimensionality reduction, clustering etc.
+
+```{r create_seurat}
+
+se.Colon <- InputFromTable(infoTable, scaleVisium = 1)
+se.Colon <- LoadImages(se.Colon, 
+                       time.resolve = FALSE, 
+                       crop.to.fiducials = TRUE, 
+                       crop.scale.factors = c(9, 8, 10, 8), 
+                       xdim = 2e3)
+se.Colon <- se.Colon %>% 
+  SCTransform(return.only.var.genes = FALSE, 
+              variable.features.n = NULL, 
+              variable.features.rv.th = 1.1)
+
 ```
 
 ```{r fig.width=6.5, fig.height=6}
 
-#base.layers <- list.files(path = "../data/V19S23-097_A1/spatial/", pattern = "base_layer_", full.names = TRUE)
-#blocking.layers <- "~/Eduardo/data/V19S23-097_A1/spatial/blocking_layer.png"
 base.layers <- c("../data/V19S23-097_A1/spatial/base_layer_alternative.png",
                  "../data/V19S23-097_A1/spatial/block_layer_alternative.png")
 xy.all <- do.call(rbind, lapply(seq_along(base.layers), function(i) {
@@ -189,8 +217,6 @@ expand.range <- function(x, exp.factor = 5, maxval = 1e4) {
 Now we can apply our functions to all spots in the Visium dataset.
 
 ```{r, fig.width=5, fig.height=5}
-
-library(dplyr)
 
 # Calculate pairwise distances
 set1 = spots[, c("pixel_x", "pixel_y")]
