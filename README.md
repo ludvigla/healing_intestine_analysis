@@ -11,3 +11,7 @@ The notebook requires Seurat v3.1.5 and sctransform v0.2.1. You can get the corr
 install.packages("versions")
 install.versions("Seurat", "3.1.5")
 ```
+
+## Data
+
+This repo includes spaceranger output files required for analysis. High resolution H&E images can be found on [GEO](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE169749).
