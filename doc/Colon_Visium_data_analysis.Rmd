@@ -48,7 +48,7 @@ library(zeallot)
 
 ```
 
-STUtility can be used to create a Seurat object from a set of files which can be collected from the SpaceRanger output folders. The required filer are; "filtered_feature_bc_matrix.h5", "tissue_hires_image.png", "scalefactors_json.json" and "tissue_positions_list.csv"
+STUtility can be used to create a Seurat object from a set of files which can be collected from the SpaceRanger output folders. The required files are; "filtered_feature_bc_matrix.h5", "tissue_hires_image.png", "scalefactors_json.json" and "tissue_positions_list.csv"
 
 STUtility recognizes a data.frame with these files supplied as columns named; "samples", "imgs", "json" and "spotfiles"
 
@@ -58,7 +58,7 @@ You can also add additional meta data to the data.frame as separate columns, whi
 
 samples <- list.files(pattern = "filtered", path = "../data", recursive = T, full.names = T)
 json <- list.files(pattern = "scalefactors", path = "../data", recursive = T, full.names = T)
-imgs <- list.files(pattern = "tif", path = "../data", recursive = T, full.names = T)
+imgs <- list.files(pattern = "tissue_hires_image.png", path = "../data", recursive = T, full.names = T)
 spotfiles <- list.files(pattern = "tissue_positions", path = "../data", recursive = T, full.names = T)
 
 infoTable <- data.frame(samples, imgs, json, spotfiles, 
@@ -71,7 +71,7 @@ The `InputFromTable` function can then be used to read the files and create a `S
 
 ```{r create_seurat}
 
-se.Colon <- InputFromTable(infoTable, scaleVisium = 1)
+se.Colon <- InputFromTable(infoTable)
 
 ```
 
@@ -102,6 +102,7 @@ p <- ggplot(gene_attr.summarized, aes(x = "", y = count, fill = biotype)) +
   scale_y_continuous(labels = scales::percent) +
   labs(x = "", y = "")
 p
+
 ```
 
 ```{r filter}
@@ -148,7 +149,7 @@ So far we can only draw the spots on the capture area coordinates without the HE
 
 ```{r loadimages}
 
-se.Colon <- LoadImages(se.Colon, time.resolve = FALSE, crop.to.fiducials = TRUE, crop.scale.factors = c(9, 8, 10, 8), xdim = 2e3)
+se.Colon <- LoadImages(se.Colon, time.resolve = FALSE, xdim = 1e3)
 
 ```
 
@@ -461,7 +462,10 @@ se.Colon.integrated <- RunUMAP(se.Colon.integrated, reduction = "harmony", dims 
 se.Colon.integrated <- FindNeighbors(se.Colon.integrated, reduction = "harmony", dims = 1:20, force.recalc = T) 
 se.Colon.integrated <- FindClusters(se.Colon.integrated, graph.name = "SCT_snn", resolution = 0.8)
 
-meta.data <- cbind(se.Colon.integrated@meta.data[, c("day", "SCT_snn_res.0.8")], GetStaffli(se.Colon.integrated)@meta.data[, 1:6])
+meta.data <- se.Colon.integrated[[]] %>% 
+  mutate(barcode = gsub(pattern = "_[1|2]", replacement = "", x = rownames(.))) %>%
+  select(barcode, day, SCT_snn_res.0.8, )
+write.table(meta.data, file = "../data/metadata_integrated.tsv", quote = F, sep = "\t", row.names = F, col.names = T)
 
 ```
 
